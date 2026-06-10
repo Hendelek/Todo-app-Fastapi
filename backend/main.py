@@ -1,5 +1,5 @@
 from uuid import uuid4
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -60,4 +60,46 @@ def delete_task(tasks_id: str):
             tasks.remove(task)
             return {"message": "deleted"}
         
-        
+class CategorySchema(BaseModel):
+    id: str
+    name: str
+ 
+class CategoryCreateSchema(BaseModel):
+    name: str
+ 
+class CategoryUpdateSchema(BaseModel):
+    name: str | None = None
+ 
+ 
+categories: list[CategorySchema] = []
+ 
+ 
+@app.get("/categories")
+def read_categories() -> list[CategorySchema]:
+    return categories
+ 
+ 
+@app.post("/categories", status_code=201)
+def create_category(payload: CategoryCreateSchema) -> CategorySchema:
+    new_category = CategorySchema(id=str(uuid4()), name=payload.name)
+    categories.append(new_category)
+    return new_category
+ 
+ 
+@app.patch("/categories/{category_id}")
+def update_category(category_id: str, payload: CategoryUpdateSchema) -> CategorySchema:
+    for category in categories:
+        if category.id == category_id:
+            if payload.name is not None:
+                category.name = payload.name
+            return category
+    raise HTTPException(status_code=404, detail="Category not found")
+ 
+ 
+@app.delete("/categories/{category_id}", status_code=204)
+def delete_category(category_id: str):
+    for category in categories:
+        if category.id == category_id:
+            categories.remove(category)
+            return
+    raise HTTPException(status_code=404, detail="Category not found")
