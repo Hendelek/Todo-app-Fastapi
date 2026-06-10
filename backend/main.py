@@ -1,10 +1,37 @@
+from contextlib import asynccontextmanager
 from uuid import uuid4
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column, Session
+
+DATABASE_URL = "postgresql+psycopg://postgres:admin@127.0.0.1:15432/postgres"
+
+engine = create_engine(DATABASE_URL)
+Sessionlocal = sessionmaker(bind=engine)
+
+class Base(DeclarativeBase):
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid4()))
 
 
-app = FastAPI()
+
+class TaskORM(Base):
+    __tablename__="tasks"
+
+    title:Mapped[str]
+
+    completed :Mapped [bool] = mapped_column(default=False)
+    
+
+@asynccontextmanager
+async def lifespan(_:FastAPI):
+    Base.metadata.create_all(bind=engine)
+    yield
+
+
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,14 +53,23 @@ class TaskUpdateSchema(BaseModel):
 
 tasks: list[TaskSchema] = []
 
+def get_db():
+    db = Sessionlocal()
+    try:
+        yield db
+    finally:
+
+     db.close()
+    
+
 # @app.get("/")
 # def read_base_page():
 #     return {"message": "hello world"}{}
 
 
 @app.get("/tasks")
-def read_tasks() -> list[TaskSchema]:
-    return tasks
+def read_tasks(db:Session = Depends(get_db)) -> list[TaskSchema]:
+    return db.query(TaskORM).all()
 
 
 @app.post("/tasks")
