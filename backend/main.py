@@ -1,9 +1,9 @@
 from contextlib import asynccontextmanager
 from uuid import uuid4
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker, DeclarativeBase, Mapped, mapped_column, Session
 
 DATABASE_URL = "postgresql+psycopg://postgres:admin@127.0.0.1:15432/postgres"
@@ -11,24 +11,30 @@ DATABASE_URL = "postgresql+psycopg://postgres:admin@127.0.0.1:15432/postgres"
 engine = create_engine(DATABASE_URL)
 Sessionlocal = sessionmaker(bind=engine)
 
-class Base(DeclarativeBase):
-    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid4()))
 
+class Base(DeclarativeBase):
+    pass
 
 
 class TaskORM(Base):
-    __tablename__="tasks"
+    __tablename__ = "tasks"
 
-    title:Mapped[str]
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid4()))
+    title: Mapped[str]
+    completed: Mapped[bool] = mapped_column(default=False)
 
-    completed :Mapped [bool] = mapped_column(default=False)
-    
+
+class CategoryORM(Base):
+    __tablename__ = "categories"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid4()))
+    name: Mapped[str]
+
 
 @asynccontextmanager
-async def lifespan(_:FastAPI):
+async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
     yield
-
 
 
 app = FastAPI(lifespan=lifespan)
@@ -37,105 +43,125 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
     allow_methods=["*"],
+    allow_headers=["*"],
 )
-class TaskSchema(BaseModel):
-    id : str
-    title : str
-    completed : bool
 
-class TasksCreateSchema(BaseModel):
-    title:str
+
+# ---------- Schemas ----------
+
+class TaskSchema(BaseModel):
+    id: str
+    title: str
+    completed: bool
+
+class TaskCreateSchema(BaseModel):
+    title: str
 
 class TaskUpdateSchema(BaseModel):
-    title:str | None=None
-    completed:bool | None=None
+    title: str | None = None
+    completed: bool | None = None
+
+class CategorySchema(BaseModel):
+    id: str
+    name: str
+
+class CategoryCreateSchema(BaseModel):
+    name: str
+
+class CategoryUpdateSchema(BaseModel):
+    name: str | None = None
 
 
-tasks: list[TaskSchema] = []
+# ---------- DB dependency ----------
 
 def get_db():
     db = Sessionlocal()
     try:
         yield db
     finally:
+        db.close()
 
-     db.close()
-    
 
-# @app.get("/")
-# def read_base_page():
-#     return {"message": "hello world"}{}
+# ---------- Helpers ----------
 
+def task_to_schema(t: TaskORM) -> TaskSchema:
+    return TaskSchema(id=t.id, title=t.title, completed=t.completed)
+
+def category_to_schema(c: CategoryORM) -> CategorySchema:
+    return CategorySchema(id=c.id, name=c.name)
+
+
+# ---------- Tasks ----------
 
 @app.get("/tasks")
-def read_tasks(db:Session = Depends(get_db)) -> list[TaskSchema]:
-    return db.query(TaskORM).all()
+def read_tasks(db: Session = Depends(get_db)) -> list[TaskSchema]:
+    return [task_to_schema(t) for t in db.scalars(select(TaskORM)).all()]
 
 
-@app.post("/tasks")
-def create_task(payload: TasksCreateSchema)-> TaskSchema:
-    new_tasks = TaskSchema(id=str(uuid4()), title=payload.title,completed=False)
+@app.post("/tasks", status_code=status.HTTP_201_CREATED)
+def create_task(payload: TaskCreateSchema, db: Session = Depends(get_db)) -> TaskSchema:
+    task = TaskORM(title=payload.title)
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task_to_schema(task)
 
-    tasks.append(new_tasks)
-    return new_tasks
 
-@app.patch("/tasks/{tasks_id}")
-def update_task(tasks_id:str, payload:TaskUpdateSchema):
-    for task in tasks:
-        if task.id == tasks_id:
-            if payload.title:
-                task.title = payload.title
-            if payload.completed is not None:
-               task.completed = payload.completed
-            return task
-        
-@app.delete("/tasks/{tasks_id}")
-def delete_task(tasks_id: str):
-    for task in tasks:
-        if task.id == tasks_id:
-            tasks.remove(task)
-            return {"message": "deleted"}
-        
-class CategorySchema(BaseModel):
-    id: str
-    name: str
- 
-class CategoryCreateSchema(BaseModel):
-    name: str
- 
-class CategoryUpdateSchema(BaseModel):
-    name: str | None = None
- 
- 
-categories: list[CategorySchema] = []
- 
- 
+@app.patch("/tasks/{task_id}")
+def update_task(task_id: str, payload: TaskUpdateSchema, db: Session = Depends(get_db)) -> TaskSchema:
+    task = db.get(TaskORM, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if payload.title is not None:
+        task.title = payload.title
+    if payload.completed is not None:
+        task.completed = payload.completed
+    db.commit()
+    db.refresh(task)
+    return task_to_schema(task)
+
+
+@app.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_task(task_id: str, db: Session = Depends(get_db)):
+    task = db.get(TaskORM, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    db.delete(task)
+    db.commit()
+
+
+# ---------- Categories ----------
+
 @app.get("/categories")
-def read_categories() -> list[CategorySchema]:
-    return categories
- 
- 
-@app.post("/categories", status_code=201)
-def create_category(payload: CategoryCreateSchema) -> CategorySchema:
-    new_category = CategorySchema(id=str(uuid4()), name=payload.name)
-    categories.append(new_category)
-    return new_category
- 
- 
+def read_categories(db: Session = Depends(get_db)) -> list[CategorySchema]:
+    return [category_to_schema(c) for c in db.scalars(select(CategoryORM)).all()]
+
+
+@app.post("/categories", status_code=status.HTTP_201_CREATED)
+def create_category(payload: CategoryCreateSchema, db: Session = Depends(get_db)) -> CategorySchema:
+    category = CategoryORM(name=payload.name)
+    db.add(category)
+    db.commit()
+    db.refresh(category)
+    return category_to_schema(category)
+
+
 @app.patch("/categories/{category_id}")
-def update_category(category_id: str, payload: CategoryUpdateSchema) -> CategorySchema:
-    for category in categories:
-        if category.id == category_id:
-            if payload.name is not None:
-                category.name = payload.name
-            return category
-    raise HTTPException(status_code=404, detail="Category not found")
- 
- 
-@app.delete("/categories/{category_id}", status_code=204)
-def delete_category(category_id: str):
-    for category in categories:
-        if category.id == category_id:
-            categories.remove(category)
-            return
-    raise HTTPException(status_code=404, detail="Category not found")
+def update_category(category_id: str, payload: CategoryUpdateSchema, db: Session = Depends(get_db)) -> CategorySchema:
+    category = db.get(CategoryORM, category_id)
+    if not category:
+        raise HTTPException(status_code=404, detail="Category not found")
+    if payload.name is not None:
+        category.name = payload.name
+    db.commit()
+    db.refresh(category)
+    return category_to_schema(category)
+
+
+@app.delete("/categories/{category_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_category(category_id: str, db: Session = Depends(get_db)):
+    category = db.get(CategoryORM, category_id)
+    if not category:
+        raise HTTPException(status_code=404, detail="Category not found")
+    db.delete(category)
+    db.commit()
